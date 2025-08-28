@@ -1,5 +1,23 @@
 import React, { useState, useRef, useEffect } from 'react';
-import { MapPin, User, Phone, Home, MessageSquare, QrCode, Navigation, AlertCircle, CheckCircle, ShoppingCart, Plus, Minus, Star, Clock, Package, Bell, Eye } from 'lucide-react';
+import {
+  MapPin,
+  User,
+  Phone,
+  Home,
+  MessageSquare,
+  QrCode,
+  Navigation,
+  AlertCircle,
+  CheckCircle,
+  ShoppingCart,
+  Plus,
+  Minus,
+  Star,
+  Clock,
+  Package,
+  Bell,
+  Eye
+} from 'lucide-react';
 
 // Utilidades
 const formatCLP = (value) => new Intl.NumberFormat('es-CL').format(value);
@@ -31,15 +49,20 @@ const App = () => {
   const [activeTab, setActiveTab] = useState('promotions');
   const [notifications, setNotifications] = useState([]);
 
-  // refs del mapa individual (para tarjetas de delivery)
+  // Distancia/tiempo por pedido (lista de delivery)
+  const [routeInfo, setRouteInfo] = useState({}); // { [orderId]: { distanceKm, durationMin } }
+  // Distancia/tiempo en modo detalle
+  const [detailInfo, setDetailInfo] = useState(null); // { distanceKm, durationMin }
+
+  // refs del mapa individual por tarjeta de delivery
   const mapRefs = useRef({});
   const mapInstances = useRef({});
-  const markerRefs = useRef({});
+  const routingControls = useRef({});
 
-  // refs del mapa “único” (modo antiguo, por si miras Detalle)
+  // refs del mapa “detalle”
   const mapRef = useRef(null);
-  const markerRef = useRef(null);
   const mapInstanceRef = useRef(null);
+  const routingDetailRef = useRef(null);
 
   // Estados de pedidos: 'pending', 'cooking', 'ready', 'delivered'
   const orderStatuses = {
@@ -150,42 +173,60 @@ const App = () => {
     }
   };
 
-  // Inicializar mapa único (modo antiguo - aún usado en detalle)
-  const initializeMap = (lat, lng) => {
-    if (!mapRef.current) return;
-    if (mapInstanceRef.current) mapInstanceRef.current.remove();
-
-    const map = window.L.map(mapRef.current).setView([lat, lng], 16);
-    window.L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', { attribution: '© OpenStreetMap contributors' }).addTo(map);
-    const marker = window.L.marker([lat, lng], { draggable: userRole === 'cashier' }).addTo(map);
-    if (userRole === 'cashier') {
-      marker.on('dragend', (e) => {
-        const p = e.target.getLatLng();
-        setCoordinates(prev => ({ ...prev, lat: p.lat, lng: p.lng }));
-      });
-    }
-    mapInstanceRef.current = map;
-    markerRef.current = marker;
-  };
-
-  // Cargar Leaflet
-  const loadLeaflet = () =>
+  // Cargar Leaflet + Routing Machine (para rutas reales)
+  const loadLeafletAndRouting = () =>
     new Promise((resolve, reject) => {
-      if (window.L) return resolve();
-      const link = document.createElement('link');
-      link.rel = 'stylesheet';
-      link.href = 'https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.css';
-      document.head.appendChild(link);
-      const script = document.createElement('script');
-      script.src = 'https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.js';
-      script.onload = resolve;
-      script.onerror = reject;
-      document.head.appendChild(script);
+      const hasLeaflet = !!window.L;
+      const hasRouting = hasLeaflet && !!window.L.Routing;
+
+      if (hasLeaflet && hasRouting) return resolve();
+
+      // CSS Leaflet
+      if (!document.querySelector('link[href*="leaflet.css"]')) {
+        const link = document.createElement('link');
+        link.rel = 'stylesheet';
+        link.href = 'https://unpkg.com/leaflet@1.9.4/dist/leaflet.css';
+        document.head.appendChild(link);
+      }
+      // CSS Routing Machine
+      if (!document.querySelector('link[href*="leaflet-routing-machine.css"]')) {
+        const linkRM = document.createElement('link');
+        linkRM.rel = 'stylesheet';
+        linkRM.href = 'https://unpkg.com/leaflet-routing-machine@latest/dist/leaflet-routing-machine.css';
+        document.head.appendChild(linkRM);
+      }
+
+      const ensureRouting = () => {
+        if (window.L && window.L.Routing) resolve();
+        else {
+          const s = document.createElement('script');
+          s.src = 'https://unpkg.com/leaflet-routing-machine@latest/dist/leaflet-routing-machine.js';
+          s.onload = resolve;
+          s.onerror = reject;
+          document.body.appendChild(s);
+        }
+      };
+
+      if (!hasLeaflet) {
+        const script = document.createElement('script');
+        script.src = 'https://unpkg.com/leaflet@1.9.4/dist/leaflet.js';
+        script.onload = ensureRouting;
+        script.onerror = reject;
+        document.body.appendChild(script);
+      } else {
+        ensureRouting();
+      }
     });
 
-  // URLs y QR (ahora con ruta desde Sushikoi)
-  const createMapsUrl = (lat, lng) => `https://www.google.com/maps/dir/${ORIGIN_COORDS.lat},${ORIGIN_COORDS.lng}/${lat},${lng}`;
-  const createQrUrl = (lat, lng) => `https://api.qrserver.com/v1/create-qr-code/?size=200x200&data=${encodeURIComponent(createMapsUrl(lat, lng))}`;
+  // URLs y QR (Google Maps con ruta desde Sushikoi / QR directo Waze)
+  const createMapsUrl = (lat, lng) =>
+    `https://www.google.com/maps/dir/${ORIGIN_COORDS.lat},${ORIGIN_COORDS.lng}/${lat},${lng}`;
+
+  // QR ahora apunta a Waze directamente
+  const createQrUrl = (lat, lng) => {
+    const wazeUrl = `https://waze.com/ul?ll=${lat},${lng}&navigate=yes`;
+    return `https://api.qrserver.com/v1/create-qr-code/?size=200x200&data=${encodeURIComponent(wazeUrl)}`;
+  };
 
   // Carrito (solo cajero)
   const addToCart = (promotion) => {
@@ -247,12 +288,68 @@ const App = () => {
     setNotifications(prev => prev.filter(notif => notif.id !== orderId));
   };
 
-  // Ver detalles (modo antiguo)
+  // Ver detalles (modo Detalle con ruteo)
   const viewOrderDetails = (order) => {
     setCoordinates(order.coordinates);
     setQrCode(order.qrUrl);
+    setDetailInfo(null);
     setIsMapVisible(true);
-    loadLeaflet().then(() => setTimeout(() => initializeMap(order.coordinates.lat, order.coordinates.lng), 100));
+
+    (async () => {
+      await loadLeafletAndRouting();
+
+      // destruye instancias anteriores
+      if (routingDetailRef.current) {
+        try { routingDetailRef.current.remove(); } catch {}
+        routingDetailRef.current = null;
+      }
+      if (mapInstanceRef.current) {
+        try { mapInstanceRef.current.remove(); } catch {}
+        mapInstanceRef.current = null;
+      }
+
+      setTimeout(() => {
+        if (!mapRef.current || !order.coordinates) return;
+        const { lat, lng } = order.coordinates;
+
+        const map = window.L.map(mapRef.current).setView([lat, lng], 14);
+        window.L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+          attribution: '© OpenStreetMap contributors'
+        }).addTo(map);
+
+        const control = window.L.Routing.control({
+          waypoints: [
+            window.L.latLng(ORIGIN_COORDS.lat, ORIGIN_COORDS.lng),
+            window.L.latLng(lat, lng)
+          ],
+          lineOptions: { styles: [{ color: 'blue', weight: 4, opacity: 0.8 }] },
+          addWaypoints: false,
+          draggableWaypoints: false,
+          fitSelectedRoutes: true,
+          show: false,
+          createMarker: (i, wp, nWps) => {
+            if (i === 0) {
+              return window.L.marker(wp.latLng).bindPopup(ORIGIN_COORDS.name);
+            } else if (i === nWps - 1) {
+              return window.L.marker(wp.latLng).bindPopup('Destino del cliente');
+            }
+            return null;
+          }
+        })
+        .on('routesfound', (e) => {
+          const route = e.routes && e.routes[0];
+          if (route && route.summary) {
+            const km = (route.summary.totalDistance / 1000).toFixed(1);
+            const min = Math.round(route.summary.totalTime / 60);
+            setDetailInfo({ distanceKm: km, durationMin: min });
+          }
+        })
+        .addTo(map);
+
+        routingDetailRef.current = control;
+        mapInstanceRef.current = map;
+      }, 120);
+    })();
   };
 
   // Manejar cambios en inputs
@@ -285,37 +382,72 @@ const App = () => {
     }
   };
 
-  // Inicializa mapas por pedido (delivery) cuando orders cambian
+  // Inicializa mapas por pedido (delivery) con RUTEADOR cuando orders cambian
   useEffect(() => {
     if (userRole !== 'delivery') return;
-    if (getFilteredOrders().length === 0) return;
-    loadLeaflet().then(() => {
-      getFilteredOrders().forEach(order => {
+    const list = getFilteredOrders();
+    if (list.length === 0) return;
+
+    (async () => {
+      await loadLeafletAndRouting();
+
+      list.forEach(order => {
         if (!order.coordinates) return;
         const { lat, lng } = order.coordinates;
-        // destruye si existía
+
+        // destruir control/instancia anterior si existe
+        if (routingControls.current[order.id]) {
+          try { routingControls.current[order.id].remove(); } catch {}
+          routingControls.current[order.id] = null;
+        }
         if (mapInstances.current[order.id]) {
-          mapInstances.current[order.id].remove();
+          try { mapInstances.current[order.id].remove(); } catch {}
           mapInstances.current[order.id] = null;
         }
-        // espera a que el div esté pintado
+
         setTimeout(() => {
           const el = mapRefs.current[order.id];
           if (!el) return;
-          const map = window.L.map(el).setView([lat, lng], 15);
-          window.L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', { attribution: '© OpenStreetMap contributors' }).addTo(map);
-          // marcador origen y destino
-          window.L.marker([ORIGIN_COORDS.lat, ORIGIN_COORDS.lng], { title: ORIGIN_COORDS.name }).addTo(map);
-          const destMarker = window.L.marker([lat, lng]).addTo(map);
-          // “ruta” simple (línea recta)
-          const latlngs = [[ORIGIN_COORDS.lat, ORIGIN_COORDS.lng], [lat, lng]];
-          window.L.polyline(latlngs, { color: 'blue', weight: 3, opacity: 0.7 }).addTo(map);
-          map.fitBounds(latlngs, { padding: [40, 40] });
+
+          const map = window.L.map(el).setView([lat, lng], 14);
+          window.L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+            attribution: '© OpenStreetMap contributors'
+          }).addTo(map);
+
+          const control = window.L.Routing.control({
+            waypoints: [
+              window.L.latLng(ORIGIN_COORDS.lat, ORIGIN_COORDS.lng),
+              window.L.latLng(lat, lng)
+            ],
+            lineOptions: { styles: [{ color: 'blue', weight: 4, opacity: 0.8 }] },
+            addWaypoints: false,
+            draggableWaypoints: false,
+            fitSelectedRoutes: true,
+            show: false,
+            createMarker: (i, wp, nWps) => {
+              if (i === 0) {
+                return window.L.marker(wp.latLng).bindPopup(ORIGIN_COORDS.name);
+              } else if (i === nWps - 1) {
+                return window.L.marker(wp.latLng).bindPopup('Destino del cliente');
+              }
+              return null;
+            }
+          })
+          .on('routesfound', (e) => {
+            const route = e.routes && e.routes[0];
+            if (route && route.summary) {
+              const km = (route.summary.totalDistance / 1000).toFixed(1);
+              const min = Math.round(route.summary.totalTime / 60);
+              setRouteInfo(prev => ({ ...prev, [order.id]: { distanceKm: km, durationMin: min } }));
+            }
+          })
+          .addTo(map);
+
+          routingControls.current[order.id] = control;
           mapInstances.current[order.id] = map;
-          markerRefs.current[order.id] = destMarker;
         }, 150);
       });
-    });
+    })();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [orders, userRole]);
 
@@ -492,7 +624,7 @@ const App = () => {
               <div className="space-y-4">
                 {cart.map((item) => (
                   <div key={item.id} className="border border-gray-200 rounded-lg p-4">
-                    <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                    <div className="grid grid-cols-1 md-grid-cols-3 md:grid-cols-3 gap-4">
                       <div className="flex items-center gap-3">
                         <span className="text-2xl">{item.image}</span>
                         <div>
@@ -589,6 +721,7 @@ const App = () => {
                   getFilteredOrders().map((order) => {
                     const status = orderStatuses[order.status];
                     const StatusIcon = status.icon;
+                    const info = routeInfo[order.id];
                     return (
                       <div key={order.id} className="border-2 border-green-200 rounded-lg p-4 hover:shadow-md transition-shadow">
                         <div className="flex justify-between items-start mb-3">
@@ -618,6 +751,11 @@ const App = () => {
 
                         <div className="mt-3 pt-3 border-t border-gray-200 flex justify-between items-center">
                           <span className="font-bold text-green-600 text-lg">Total: ${formatCLP(order.total)}</span>
+                          {info && (
+                            <span className="text-sm text-gray-600">
+                              Ruta estimada: <strong>{info.distanceKm} km</strong> • <strong>{info.durationMin} min</strong>
+                            </span>
+                          )}
                         </div>
 
                         {/* Mapa individual por pedido */}
@@ -634,9 +772,14 @@ const App = () => {
                           </div>
                         )}
 
-                        {order.status === 'ready' && (
-                          <button onClick={() => updateOrderStatus(order.id, 'delivered')} className="mt-4 w-full bg-green-500 hover:bg-green-600 text-white font-medium py-2 px-4 rounded-lg flex items-center justify-center gap-2"><CheckCircle size={16} />Marcar Entregado</button>
-                        )}
+                        <div className="flex gap-2 mt-3">
+                          <button onClick={() => viewOrderDetails(order)} className="flex-1 bg-blue-100 hover:bg-blue-200 text-blue-700 font-medium py-2 px-4 rounded-lg transition duration-200 flex items-center justify-center gap-2">
+                            <Eye size={16} /> Ver Ubicación (detalle)
+                          </button>
+                          {order.status === 'ready' && (
+                            <button onClick={() => updateOrderStatus(order.id, 'delivered')} className="flex-1 bg-green-500 hover:bg-green-600 text-white font-medium py-2 px-4 rounded-lg transition duration-200 flex items-center justify-center gap-2"><CheckCircle size={16} />Marcar Entregado</button>
+                          )}
+                        </div>
                       </div>
                     );
                   })
@@ -646,27 +789,33 @@ const App = () => {
           </div>
         )}
 
-        {/* Mapa y QR - Solo para delivery cuando uses el modo antiguo “Ver Ubicación” */}
-        {userRole === 'delivery' && isMapVisible && (
+        {/* Modo Detalle: mapa + ruteo + QR (delivery) */}
+        {userRole === 'delivery' && isMapVisible && coordinates && (
           <div className="mt-8 grid grid-cols-1 lg:grid-cols-2 gap-6">
+            {/* Mapa + ruteo desde Sushikoi */}
             <div className="bg-white rounded-lg shadow-lg p-6">
-              <h3 className="text-xl font-semibold text-gray-800 mb-4 flex items-center gap-2"><MapPin className="text-green-500" />Ubicación del Cliente</h3>
-              <div ref={mapRef} className="h-64 w-full rounded-lg border" style={{ minHeight: '250px' }} />
-              <p className="text-sm text-gray-600 mt-2">📍 Ubicación exacta del cliente</p>
+              <h3 className="text-xl font-semibold text-gray-800 mb-4 flex items-center gap-2"><MapPin className="text-green-500" />Ruta desde Sushikoi al Cliente</h3>
+              <div ref={mapRef} className="h-72 w-full rounded-lg border" />
+              {detailInfo && (
+                <p className="text-sm text-gray-600 mt-2">
+                  Distancia estimada: <strong>{detailInfo.distanceKm} km</strong> • Tiempo: <strong>{detailInfo.durationMin} min</strong>
+                </p>
+              )}
+              <p className="text-xs text-gray-500 mt-1">Inicio: {ORIGIN_COORDS.name}</p>
             </div>
-            {qrCode && coordinates && (
-              <div className="bg-white rounded-lg shadow-lg p-6">
-                <h3 className="text-xl font-semibold text-gray-800 mb-4 flex items-center gap-2"><QrCode className="text-blue-500" />Navegación Rápida</h3>
-                <div className="text-center">
-                  <img src={qrCode} alt="QR Code" className="mx-auto mb-4 border rounded-lg shadow-sm" />
-                  <div className="space-y-2">
-                    <button onClick={() => openInMaps(createMapsUrl(coordinates.lat, coordinates.lng))} className="w-full bg-blue-500 hover:bg-blue-600 text-white font-medium py-3 px-4 rounded-lg transition duration-200 flex items-center justify-center gap-2"><Navigation size={16} />Abrir en Google Maps</button>
-                    <button onClick={() => openInMaps('', 'waze')} className="w-full bg-cyan-500 hover:bg-cyan-600 text-white font-medium py-3 px-4 rounded-lg transition duration-200 flex items-center justify-center gap-2"><Navigation size={16} />Abrir en Waze</button>
-                    <div className="mt-4 p-3 bg-gray-50 rounded-lg"><p className="text-sm text-gray-600"><strong>Coordenadas:</strong> {coordinates.lat.toFixed(6)}, {coordinates.lng.toFixed(6)}</p></div>
-                  </div>
+
+            {/* QR y navegación rápida (Waze por QR) */}
+            <div className="bg-white rounded-lg shadow-lg p-6">
+              <h3 className="text-xl font-semibold text-gray-800 mb-4 flex items-center gap-2"><QrCode className="text-blue-500" />Navegación Rápida</h3>
+              <div className="text-center">
+                <img src={createQrUrl(coordinates.lat, coordinates.lng)} alt="QR Code" className="mx-auto mb-4 border rounded-lg shadow-sm" />
+                <div className="space-y-2">
+                  <button onClick={() => openInMaps(createMapsUrl(coordinates.lat, coordinates.lng))} className="w-full bg-blue-500 hover:bg-blue-600 text-white font-medium py-3 px-4 rounded-lg transition duration-200 flex items-center justify-center gap-2"><Navigation size={16} />Abrir en Google Maps</button>
+                  <button onClick={() => openInMaps('', 'waze')} className="w-full bg-cyan-500 hover:bg-cyan-600 text-white font-medium py-3 px-4 rounded-lg transition duration-200 flex items-center justify-center gap-2"><Navigation size={16} />Abrir en Waze</button>
+                  <div className="mt-4 p-3 bg-gray-50 rounded-lg"><p className="text-sm text-gray-600"><strong>Coordenadas:</strong> {coordinates.lat.toFixed(6)}, {coordinates.lng.toFixed(6)}</p></div>
                 </div>
               </div>
-            )}
+            </div>
           </div>
         )}
 
