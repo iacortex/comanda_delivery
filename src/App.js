@@ -204,6 +204,53 @@ const fetchRoute = async (dLat, dLng) => {
   return { points, distance: r.distance, duration: r.duration };
 };
 
+/* ===================== ETA & Progreso para Cliente ===================== */
+const pct = (n) => Math.max(0, Math.min(100, Math.round(n)));
+
+const etaFrom = (createdAt, minutes) => {
+  const end = createdAt + minutes * 60_000;
+  return Math.max(0, Math.ceil((end - Date.now()) / 60_000));
+};
+
+const progressFor = (order) => {
+  if (!order) return { pct: 0, label: "—" };
+
+  if (order.status === "pending") {
+    const elapsed = (Date.now() - order.createdAt) / 60_000;
+    const total = Math.max(5, order.estimatedTime || 15);
+    return { pct: pct((elapsed / total) * 100 * 0.5), label: "En cola" }; // 0→50
+  }
+  if (order.status === "cooking") {
+    const elapsed = (Date.now() - (order.cookingAt || order.createdAt)) / 60_000;
+    const total = Math.max(5, order.estimatedTime || 15);
+    return { pct: pct(50 + (elapsed / total) * 100 * 0.4), label: "Cocinando" }; // 50→90
+  }
+  if (order.status === "ready") {
+    if (order.packUntil) {
+      const remain = Math.max(0, order.packUntil - Date.now());
+      const done = 90_000 - remain;
+      return { pct: pct(90 + (done / 90_000) * 10), label: "Empaque" }; // 90→100
+    }
+    return { pct: 95, label: "Listo" };
+  }
+  if (order.status === "delivered") return { pct: 100, label: "Entregado" };
+  return { pct: 0, label: "—" };
+};
+
+const minutesLeftFor = (order) => {
+  if (!order) return 0;
+  if (order.status === "pending" || order.status === "cooking") {
+    return etaFrom(order.createdAt, Math.max(5, order.estimatedTime || 15));
+  }
+  if (order.status === "ready") {
+    if (!order.packUntil) return 0;
+    return Math.ceil(Math.max(0, order.packUntil - Date.now()) / 60_000);
+  }
+  return 0;
+};
+
+const shortCode = (id) => id.toString().slice(-5);
+
 /* ===================== Tarjeta de Delivery ===================== */
 const DeliveryOrderCard = ({
   order,
@@ -298,6 +345,7 @@ const DeliveryOrderCard = ({
           <p className="text-gray-600 font-semibold">{order.name}</p>
           <p className="text-sm text-gray-500">{order.phone}</p>
           <p className="text-sm text-gray-500">{order.timestamp}</p>
+          <p className="text-xs text-gray-500">Código: {shortCode(order.id)}</p>
         </div>
         <div
           className={`flex items-center gap-1 px-3 py-1 rounded-full text-sm font-medium ${
@@ -320,8 +368,7 @@ const DeliveryOrderCard = ({
           )}
           {order.geocodePrecision && order.geocodePrecision !== "exact" && (
             <p className="text-xs mt-2 px-2 py-1 rounded bg-amber-50 text-amber-800 inline-flex items-center gap-1">
-              <AlertCircle size={12} /> Punto aproximado (
-              {order.geocodePrecision})
+              <AlertCircle size={12} /> Punto aproximado ({order.geocodePrecision})
             </p>
           )}
         </div>
@@ -340,17 +387,13 @@ const DeliveryOrderCard = ({
             <div className="flex flex-wrap items-center gap-2">
               <span
                 className={`px-2 py-0.5 rounded text-xs ${
-                  unpaid
-                    ? "bg-red-100 text-red-700"
-                    : "bg-green-100 text-green-700"
+                  unpaid ? "bg-red-100 text-red-700" : "bg-green-100 text-green-700"
                 }`}
               >
                 {unpaid ? "Por pagar" : "Pagado"}
               </span>
               <span className="px-2 py-0.5 rounded text-xs bg-gray-100 text-gray-700 capitalize">
-                {unpaid
-                  ? `Pagará: ${order.dueMethod}`
-                  : `Método: ${order.paymentMethod}`}
+                {unpaid ? `Pagará: ${order.dueMethod}` : `Método: ${order.paymentMethod}`}
               </span>
               {unpaid && (
                 <button
@@ -371,8 +414,7 @@ const DeliveryOrderCard = ({
         </span>
         {order.routeMeta && (
           <span className="text-sm text-gray-600">
-            🛣️ {formatKm(order.routeMeta.distance)} • ⏱️{" "}
-            {formatDur(order.routeMeta.duration)}
+            🛣️ {formatKm(order.routeMeta.distance)} • ⏱️ {formatDur(order.routeMeta.duration)}
           </span>
         )}
       </div>
@@ -387,18 +429,14 @@ const DeliveryOrderCard = ({
           </p>
           <img
             src={`https://api.qrserver.com/v1/create-qr-code/?size=220x220&data=${encodeURIComponent(
-              order.wazeUrl ||
-                wazeUrl(order.coordinates.lat, order.coordinates.lng)
+              order.wazeUrl || wazeUrl(order.coordinates.lat, order.coordinates.lng)
             )}`}
             alt="QR Waze"
             className="mx-auto mb-4 border rounded-lg shadow-sm"
           />
           <button
             onClick={() =>
-              window.open(
-                gmapsDir(order.coordinates.lat, order.coordinates.lng),
-                "_blank"
-              )
+              window.open(gmapsDir(order.coordinates.lat, order.coordinates.lng), "_blank")
             }
             className="w-full bg-blue-500 hover:bg-blue-600 text-white font-medium py-2 px-4 rounded-lg mb-2 flex items-center justify-center gap-2"
           >
@@ -406,10 +444,7 @@ const DeliveryOrderCard = ({
           </button>
           <button
             onClick={() =>
-              window.open(
-                wazeUrl(order.coordinates.lat, order.coordinates.lng),
-                "_blank"
-              )
+              window.open(wazeUrl(order.coordinates.lat, order.coordinates.lng), "_blank")
             }
             className="w-full bg-cyan-500 hover:bg-cyan-600 text-white font-medium py-2 px-4 rounded-lg flex items-center justify-center gap-2"
           >
@@ -423,9 +458,7 @@ const DeliveryOrderCard = ({
           onClick={onDelivered}
           disabled={order.paymentStatus === "due"}
           className={`mt-4 w-full ${
-            order.paymentStatus === "due"
-              ? "bg-gray-400 cursor-not-allowed"
-              : "bg-green-500 hover:bg-green-600"
+            order.paymentStatus === "due" ? "bg-gray-400 cursor-not-allowed" : "bg-green-500 hover:bg-green-600"
           } text-white font-medium py-2 px-4 rounded-lg flex items-center justify-center gap-2`}
         >
           <CheckCircle size={16} /> Marcar Entregado
@@ -435,11 +468,208 @@ const DeliveryOrderCard = ({
   );
 };
 
+/* ===================== Cliente: seguimiento ===================== */
+const ClientTracker = ({ orders }) => {
+  useTicker();
+  const [query, setQuery] = useState("");
+  const [found, setFound] = useState(null);
+  const [totemMode, setTotemMode] = useState(false);
+
+  useEffect(() => {
+    // abrir directo desde hash #order-XXXXX (para QR)
+    const h = window.location.hash;
+    const m = h.match(/#order-(\d{4,6})/i);
+    if (m) {
+      const code = m[1];
+      const byCode = orders.find((o) => shortCode(o.id) === code);
+      if (byCode) setFound(byCode);
+    }
+  }, [orders]);
+
+  const search = () => {
+    const q = query.trim();
+    if (!q) return setFound(null);
+    const norm = q.replace(/\s|-/g, "");
+    const byCode = orders.find((o) => shortCode(o.id) === norm);
+    if (byCode) return setFound(byCode);
+    // por teléfono (último creado primero)
+    const byPhone = orders
+      .slice()
+      .reverse()
+      .find((o) => (o.phone || "").replace(/\s|-/g, "") === norm);
+    if (byPhone) return setFound(byPhone);
+    setFound(null);
+  };
+
+  const StatusIcon =
+    found &&
+    ({
+      pending: Clock,
+      cooking: Package,
+      ready: Bell,
+      delivered: CheckCircle,
+    }[found.status] || Clock);
+
+  if (totemMode) {
+    const active = orders.filter((o) => o.status !== "delivered").slice(-12).reverse();
+    return (
+      <div className="bg-black text-white rounded-xl p-4">
+        <div className="flex items-center justify-between mb-4">
+          <h3 className="text-2xl font-black">🖥️ Totem — Pedidos en curso</h3>
+          <button onClick={() => setTotemMode(false)} className="px-3 py-1 rounded bg-white/10 hover:bg-white/20">
+            Salir de Totem
+          </button>
+        </div>
+        <div className="grid grid-cols-2 lg:grid-cols-3 gap-4">
+          {active.length === 0 && (
+            <div className="col-span-full text-center opacity-70 py-12">Sin pedidos aún</div>
+          )}
+          {active.map((o) => {
+            const p = progressFor(o);
+            const left = minutesLeftFor(o);
+            return (
+              <div key={o.id} className="bg-white text-gray-900 rounded-lg p-4">
+                <div className="flex items-start justify-between">
+                  <div>
+                    <p className="text-sm text-gray-500">Código</p>
+                    <p className="text-xl font-black tracking-widest">{shortCode(o.id)}</p>
+                  </div>
+                  <span className="text-xs px-2 py-0.5 rounded bg-gray-100">
+                    {o.status === "pending" ? "Pendiente" :
+                     o.status === "cooking" ? "Cocinando" :
+                     o.status === "ready" ? "Listo" : "Entregado"}
+                  </span>
+                </div>
+                <p className="text-sm mt-1 line-clamp-1">{o.name}</p>
+                <div className="mt-3">
+                  <div className="w-full h-2 bg-gray-200 rounded-full overflow-hidden">
+                    <div className="h-2 bg-green-500" style={{ width: `${p.pct}%` }} />
+                  </div>
+                  <div className="flex justify-between text-xs mt-1">
+                    <span>{p.label}</span>
+                    <span>{left} min</span>
+                  </div>
+                </div>
+                <img
+                  alt="QR seguimiento"
+                  className="mt-3 mx-auto border rounded"
+                  src={`https://api.qrserver.com/v1/create-qr-code/?size=140x140&data=${encodeURIComponent(
+                    `${window.location.origin}${window.location.pathname}#order-${shortCode(o.id)}`
+                  )}`}
+                />
+              </div>
+            );
+          })}
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="bg-white rounded-lg shadow-lg p-6 max-w-3xl mx-auto">
+      <div className="flex items-center gap-2 mb-4">
+        <h2 className="text-2xl font-semibold text-gray-800">📦 Seguimiento de Pedido</h2>
+        <button
+          onClick={() => setTotemMode(true)}
+          className="ml-auto text-sm px-3 py-1 rounded bg-gray-100 hover:bg-gray-200"
+        >
+          Modo Totem
+        </button>
+      </div>
+
+      <div className="flex gap-2">
+        <input
+          className="flex-1 px-3 py-2 border rounded-lg focus:ring-2 focus:ring-red-500 border-gray-300"
+          placeholder="Ingresa tu teléfono (+569...) o Código (últimos 5)"
+          value={query}
+          onChange={(e) => setQuery(e.target.value)}
+          onKeyDown={(e) => e.key === "Enter" && search()}
+        />
+        <button
+          onClick={search}
+          className="px-4 py-2 rounded-lg bg-red-500 hover:bg-red-600 text-white font-medium"
+        >
+          Buscar
+        </button>
+      </div>
+
+      {!found && (
+        <p className="text-sm text-gray-500 mt-3">
+          Tip: El <b>código</b> aparece en tu boleta/confirmación (últimos 5 dígitos del pedido).
+        </p>
+      )}
+
+      {found && (
+        <div className="mt-6 border rounded-lg p-4">
+          <div className="flex items-start justify-between">
+            <div>
+              <p className="text-xs text-gray-500">Código</p>
+              <p className="text-2xl font-black tracking-widest">{shortCode(found.id)}</p>
+              <p className="text-sm text-gray-700 mt-1">{found.name}</p>
+              <p className="text-xs text-gray-500">{found.address}</p>
+            </div>
+            <div
+              className={`px-3 py-1 rounded-full text-sm ${
+                found.status === "pending"
+                  ? "bg-yellow-100 text-yellow-800"
+                  : found.status === "cooking"
+                  ? "bg-orange-100 text-orange-800"
+                  : found.status === "ready"
+                  ? "bg-green-100 text-green-800"
+                  : "bg-blue-100 text-blue-800"
+              }`}
+            >
+              {found.status === "pending"
+                ? "Pendiente"
+                : found.status === "cooking"
+                ? "Cocinando"
+                : found.status === "ready"
+                ? "Listo para retiro/entrega"
+                : "Entregado"}
+            </div>
+          </div>
+
+          <div className="mt-4">
+            {StatusIcon && <StatusIcon className="inline mr-2 text-gray-500" size={18} />}
+            <span className="text-gray-700">
+              {progressFor(found).label} — quedan <b>{minutesLeftFor(found)} min</b>
+            </span>
+            <div className="w-full h-3 bg-gray-200 rounded-full overflow-hidden mt-2">
+              <div className="h-3 bg-green-500" style={{ width: `${progressFor(found).pct}%` }} />
+            </div>
+          </div>
+
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-3 mt-4">
+            <div className="bg-gray-50 rounded p-3">
+              <p className="text-xs text-gray-500">Tiempo estimado cocina</p>
+              <p className="text-lg font-semibold">{found.estimatedTime} min</p>
+            </div>
+            <div className="bg-gray-50 rounded p-3">
+              <p className="text-xs text-gray-500">Total</p>
+              <p className="text-lg font-semibold">${formatCLP(found.total)}</p>
+            </div>
+            <div className="bg-gray-50 rounded p-3 text-center">
+              <p className="text-xs text-gray-500 mb-1">Escanea para abrir</p>
+              <img
+                alt="QR Pedido"
+                className="mx-auto border rounded"
+                src={`https://api.qrserver.com/v1/create-qr-code/?size=140x140&data=${encodeURIComponent(
+                  `${window.location.origin}${window.location.pathname}#order-${shortCode(found.id)}`
+                )}`}
+              />
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+};
+
 /* ===================== App ===================== */
 const App = () => {
   useTicker();
 
-  const [userRole, setUserRole] = useState("cashier"); // 'cashier', 'cook', 'delivery'
+  const [userRole, setUserRole] = useState("cashier"); // 'cashier', 'cook', 'delivery', 'client'
   const [showDashboard, setShowDashboard] = useState(false);
 
   /* ===== Datos del cliente ===== */
@@ -728,9 +958,7 @@ const App = () => {
     const ex = cart.find((i) => i.id === p.id);
     if (ex)
       setCart(
-        cart.map((i) =>
-          i.id === p.id ? { ...i, quantity: i.quantity + 1 } : i
-        )
+        cart.map((i) => (i.id === p.id ? { ...i, quantity: i.quantity + 1 } : i))
       );
     else setCart([...cart, { ...p, quantity: 1 }]);
   };
@@ -795,8 +1023,10 @@ const App = () => {
       const coords = selectedCoords;
       const route = await fetchRoute(coords.lat, coords.lng);
 
+      const nowId = Date.now();
       const newOrder = {
-        id: Date.now(),
+        id: nowId,
+        publicCode: shortCode(nowId),
         name: customerData.name,
         phone: customerData.phone,
         address: addrStr,
@@ -809,10 +1039,10 @@ const App = () => {
         wazeUrl: wazeUrl(coords.lat, coords.lng),
         status: "pending",
         timestamp: new Date().toLocaleString("es-CL"),
+        createdAt: Date.now(),
+        cookingAt: null,
         estimatedTime: getEstimatedCookingTime(),
-        routeMeta: route
-          ? { distance: route.distance, duration: route.duration }
-          : null,
+        routeMeta: route ? { distance: route.distance, duration: route.duration } : null,
         createdBy: "Cajero",
         geocodePrecision: geocodedCoords?.precision || "unknown",
         paymentMethod: customerData.paymentMethod,
@@ -865,7 +1095,7 @@ const App = () => {
       setSelectedCoords(null);
       setErrors({});
       alert(
-        `✅ Pedido creado para ${newOrder.name}.\n🕐 Estimado cocina: ${newOrder.estimatedTime} min`
+        `✅ Pedido creado para ${newOrder.name}.\n🔢 Código: ${shortCode(newOrder.id)}\n🕐 Estimado cocina: ${newOrder.estimatedTime} min`
       );
       setActiveTab("promotions");
     } catch {
@@ -880,13 +1110,11 @@ const App = () => {
     setOrders((prev) =>
       prev.map((o) => {
         if (o.id !== orderId) return o;
+        if (newStatus === "cooking") {
+          return { ...o, status: "cooking", cookingAt: o.cookingAt || Date.now() };
+        }
         if (newStatus === "ready" && !o.packUntil) {
-          return {
-            ...o,
-            status: "ready",
-            packUntil: Date.now() + 90_000,
-            packed: false,
-          };
+          return { ...o, status: "ready", packUntil: Date.now() + 90_000, packed: false };
         }
         return { ...o, status: newStatus };
       })
@@ -942,6 +1170,7 @@ const App = () => {
       cashier: "🏪 Panel de Cajero/Vendedor",
       cook: "👨‍🍳 Panel de Cocinero",
       delivery: "🛵 Panel de Delivery",
+      client: "🙋 Panel de Cliente",
     }[userRole] || "Panel");
 
   /* ===================== Dashboard data ===================== */
@@ -1031,6 +1260,19 @@ const App = () => {
             }`}
           >
             🛵 Delivery
+          </button>
+          <button
+            onClick={() => {
+              setUserRole("client");
+              setShowDashboard(false);
+            }}
+            className={`px-4 py-2 rounded-lg font-medium transition ${
+              userRole === "client" && !showDashboard
+                ? "bg-pink-600 text-white"
+                : "bg-gray-100 text-gray-700 hover:bg-gray-200"
+            }`}
+          >
+            🙋 Cliente
           </button>
           <span className="mx-2">|</span>
           <button
@@ -1475,7 +1717,7 @@ const App = () => {
                     }
                     className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-red-500"
                     placeholder="Ej: Casa amarilla con reja negra, frente a semáforo…"
-                    rows="3"
+                    rows={3}
                   />
                 </div>
 
@@ -1496,11 +1738,7 @@ const App = () => {
                       className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-red-500 bg-white capitalize"
                     >
                       {PAYMENT_METHODS.map((m) => (
-                        <option
-                          key={m.value}
-                          value={m.value}
-                          className="capitalize"
-                        >
+                        <option key={m.value} value={m.value} className="capitalize">
                           {m.label}
                         </option>
                       ))}
@@ -1560,15 +1798,11 @@ const App = () => {
                         geocodedCoords &&
                         geocodedCoords.precision !== "exact" && (
                           <span className="text-xs px-2 py-1 rounded bg-amber-50 text-amber-800 flex items-center gap-1">
-                            <AlertCircle size={12} /> No se encontró la
-                            numeración exacta. Ajusta el pin.
+                            <AlertCircle size={12} /> No se encontró la numeración exacta. Ajusta el pin.
                           </span>
                         )}
                     </div>
-                    <div
-                      ref={addrMapRef}
-                      className="h-64 w-full rounded-lg border"
-                    />
+                    <div ref={addrMapRef} className="h-64 w-full rounded-lg border" />
                     <div className="text-xs text-gray-600 mt-2">
                       Origen: <b>{ORIGIN.name}</b>
                       {selectedCoords && (
@@ -1576,8 +1810,7 @@ const App = () => {
                           {" "}
                           — Selección:{" "}
                           <b>
-                            {selectedCoords.lat.toFixed(6)},{" "}
-                            {selectedCoords.lng.toFixed(6)}
+                            {selectedCoords.lat.toFixed(6)}, {selectedCoords.lng.toFixed(6)}
                           </b>
                         </>
                       )}
@@ -1611,8 +1844,7 @@ const App = () => {
                     <ul className="text-sm text-green-700 space-y-1">
                       {cart.map((i) => (
                         <li key={i.id}>
-                          {i.quantity}x {i.name} - $
-                          {formatCLP(i.discountPrice * i.quantity)}
+                          {i.quantity}x {i.name} - ${formatCLP(i.discountPrice * i.quantity)}
                         </li>
                       ))}
                     </ul>
@@ -1621,8 +1853,7 @@ const App = () => {
                         Total: ${formatCLP(getCartTotal())}
                       </p>
                       <p className="text-sm text-green-600">
-                        Tiempo estimado de cocina: {getEstimatedCookingTime()}{" "}
-                        min
+                        Tiempo estimado de cocina: {getEstimatedCookingTime()} min
                       </p>
                     </div>
                   </div>
@@ -1731,8 +1962,7 @@ const App = () => {
                   <div className="text-center space-y-2">
                     <div className="text-sm text-gray-600 flex items-center justify-center gap-2">
                       <Clock size={16} />
-                      Tiempo estimado de preparación:{" "}
-                      {getEstimatedCookingTime()} min
+                      Tiempo estimado de preparación: {getEstimatedCookingTime()} min
                     </div>
                     <button
                       onClick={() => setActiveTab("customer")}
@@ -1797,6 +2027,9 @@ const App = () => {
                               <p className="text-gray-600">{order.name}</p>
                               <p className="text-sm text-gray-500">
                                 {order.timestamp}
+                              </p>
+                              <p className="text-xs text-gray-500">
+                                Código: {shortCode(order.id)}
                               </p>
                             </div>
                             <div
@@ -1880,8 +2113,7 @@ const App = () => {
                 <Package className="text-green-500" /> Pedidos para Delivery
               </h2>
               <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-                {getFilteredOrders().filter((o) => o.status === "ready")
-                  .length === 0 ? (
+                {getFilteredOrders().filter((o) => o.status === "ready").length === 0 ? (
                   <div className="col-span-2 text-center py-8 text-gray-500">
                     <Package size={48} className="mx-auto mb-4 text-gray-300" />
                     <p>No hay pedidos listos para entregar</p>
@@ -1896,9 +2128,7 @@ const App = () => {
                         orderStatuses={orderStatuses}
                         statusPillClass={statusPillClass}
                         onConfirmPayment={() => confirmPayment(order.id)}
-                        onDelivered={() =>
-                          updateOrderStatus(order.id, "delivered")
-                        }
+                        onDelivered={() => updateOrderStatus(order.id, "delivered")}
                       />
                     ))
                 )}
@@ -1911,11 +2141,8 @@ const App = () => {
                 <CheckCircle className="text-blue-500" /> Pedidos Finalizados
               </h2>
               <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-                {getFilteredOrders().filter((o) => o.status === "delivered")
-                  .length === 0 ? (
-                  <p className="text-gray-500">
-                    Aún no hay pedidos finalizados.
-                  </p>
+                {getFilteredOrders().filter((o) => o.status === "delivered").length === 0 ? (
+                  <p className="text-gray-500">Aún no hay pedidos finalizados.</p>
                 ) : (
                   getFilteredOrders()
                     .filter((o) => o.status === "delivered")
@@ -1926,8 +2153,9 @@ const App = () => {
                             <p className="font-semibold text-gray-800">
                               #{order.id.toString().slice(-4)} — {order.name}
                             </p>
+                            <p className="text-xs text-gray-500">{order.address}</p>
                             <p className="text-xs text-gray-500">
-                              {order.address}
+                              Código: {shortCode(order.id)}
                             </p>
                           </div>
                           <span className="px-2 py-0.5 rounded text-xs bg-blue-100 text-blue-700">
@@ -1937,9 +2165,7 @@ const App = () => {
                         <div className="mt-2 text-sm">
                           <span className="text-gray-700">Pago: </span>
                           <span className="font-medium">
-                            {order.paymentStatus === "paid"
-                              ? "Pagado"
-                              : "Por pagar"}
+                            {order.paymentStatus === "paid" ? "Pagado" : "Por pagar"}
                           </span>
                           {order.paymentStatus === "paid" && order.paidAt && (
                             <span className="ml-2 text-xs text-gray-500">
@@ -1955,12 +2181,18 @@ const App = () => {
           </div>
         )}
 
+        {/* ===================== CLIENTE – Seguimiento ===================== */}
+        {!showDashboard && userRole === "client" && (
+          <div className="max-w-5xl mx-auto">
+            <ClientTracker orders={orders} />
+          </div>
+        )}
+
         {/* ===================== Historial (para cajero) ===================== */}
         {!showDashboard && userRole === "cashier" && orders.length > 0 && (
           <div className="mt-8 bg-white rounded-lg shadow-lg p-6">
             <h3 className="text-xl font-semibold text-gray-800 mb-4 flex items-center gap-2">
-              <CheckCircle className="text-blue-500" /> Historial de Pedidos (
-              {orders.length})
+              <CheckCircle className="text-blue-500" /> Historial de Pedidos ({orders.length})
             </h3>
             <div className="space-y-4">
               {orders
@@ -1970,38 +2202,31 @@ const App = () => {
                   const status = orderStatuses[order.status];
                   const StatusIcon = status.icon;
                   return (
-                    <div
-                      key={order.id}
-                      className="border border-gray-200 rounded-lg p-4"
-                    >
+                    <div key={order.id} className="border border-gray-200 rounded-lg p-4">
                       <div className="grid grid-cols-1 lg:grid-cols-5 gap-4">
                         <div>
-                          <h4 className="font-semibold text-gray-800 mb-1">
-                            Cliente
-                          </h4>
+                          <h4 className="font-semibold text-gray-800 mb-1">Estado del Pedido</h4>
                           <p className="text-sm">{order.name}</p>
                           <p className="text-xs text-gray-500">{order.phone}</p>
                           <p className="text-xs text-gray-500">
                             #{order.id.toString().slice(-4)}
                           </p>
+                          <p className="text-xs text-gray-500">
+                            Código: {shortCode(order.id)}
+                          </p>
                         </div>
                         <div>
-                          <h4 className="font-semibold text-gray-800 mb-1">
-                            Dirección
-                          </h4>
+                          <h4 className="font-semibold text-gray-800 mb-1">Dirección</h4>
                           <p className="text-sm">{order.address}</p>
                           <p className="text-xs text-gray-500">{order.city}</p>
-                          {order.geocodePrecision &&
-                            order.geocodePrecision !== "exact" && (
-                              <p className="text-xs text-amber-700 mt-1">
-                                Punto aprox. ({order.geocodePrecision})
-                              </p>
-                            )}
+                          {order.geocodePrecision && order.geocodePrecision !== "exact" && (
+                            <p className="text-xs text-amber-700 mt-1">
+                              Punto aprox. ({order.geocodePrecision})
+                            </p>
+                          )}
                         </div>
                         <div>
-                          <h4 className="font-semibold text-gray-800 mb-1">
-                            Pedido
-                          </h4>
+                          <h4 className="font-semibold text-gray-800 mb-1">Pedido</h4>
                           <ul className="text-xs text-gray-600">
                             {order.cart.map((it, i) => (
                               <li key={i}>
@@ -2021,9 +2246,7 @@ const App = () => {
                           <p className="font-bold text-red-600 text-sm">
                             ${formatCLP(order.total)}
                           </p>
-                          <p className="text-xs text-gray-500">
-                            {order.timestamp}
-                          </p>
+                          <p className="text-xs text-gray-500">{order.timestamp}</p>
                           <div className="mt-1 text-xs">
                             <span
                               className={`px-2 py-0.5 rounded ${
@@ -2032,9 +2255,7 @@ const App = () => {
                                   : "bg-red-100 text-red-700"
                               }`}
                             >
-                              {order.paymentStatus === "paid"
-                                ? "Pagado"
-                                : "Por pagar"}
+                              {order.paymentStatus === "paid" ? "Pagado" : "Por pagar"}
                             </span>
                           </div>
                         </div>
